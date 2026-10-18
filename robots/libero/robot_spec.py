@@ -163,12 +163,12 @@ def get_toolkit(
             "task": config.prompt_vars.get("task"),
             "seed": config.prompt_vars.get("seed"),
         },
-        read_log_path=(
-            config.output_dir / "memory_reads.jsonl"
-            if config.prompt_vars.get("memory_abstention", "none")
-            == "strict_identity"
-            else None
-        ),
+        # Keep the memory provenance audit enabled for every run mode.  The
+        # compatibility gate controls which files may be exposed, while the
+        # read log records what the planner actually received.  Restricting
+        # this to ``strict_identity`` made baseline/evaluation runs silently
+        # lose the evidence needed to audit ordinary (``none``) routing.
+        read_log_path=config.output_dir / "memory_reads.jsonl",
     )
     toolkit = LiberoToolkit(
         runtime_kwargs=runtime_kwargs,
