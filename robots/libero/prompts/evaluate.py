@@ -403,10 +403,12 @@ out every scene a memory covers — so SEARCH the library yourself rather than
 reading the index alone: `list_dir` `{{memory_dir}}/global/` and
 `{{memory_dir}}/task-family/` to see every memory file, and pick candidates by the
 objects, container, fixture or motion your scene involves (wording taken from
-your task description works as a search key too). If a shell / grep tool is
-available to you, `grep -rl "<keyword>" {{memory_dir}}/global/
-{{memory_dir}}/task-family/` jumps straight to the files that mention your objects
-— use it when you can; otherwise fall back to `list_dir` + `read_text_file`.
+your task description works as a search key too). Do not use shell commands,
+grep, or a composite command to access memory. Those paths are not auditable by
+the memory manager and a partial shell failure can look like a successful
+consultation. Use the structured `list_dir` and `read_text_file` tools only;
+call `read_text_file` separately for every memory file whose body you deliver
+to yourself, and stop if a required read fails.
 A given theme often has several near-identical skill files (e.g. multiple
 stove / basket / mug patterns that differ only in WHICH objects or step
 order). When it does, do NOT pick from the one-line index or stop at the first
