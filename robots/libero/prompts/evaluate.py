@@ -532,7 +532,7 @@ LOCAL_MEMORY_PROFILE = """Use the LOCAL exploration corpus for this evaluation. 
 different jobs; use every layer that is available:
 
 1. GLOBAL: `{{memory_dir}}/global/` — reusable robot/perception/primitive lessons.
-2. TASK-FAMILY: `{{memory_dir}}/task-family/task-family_libero10_<regime>_t{{task}}.md` — the
+2. TASK-FAMILY: `{{memory_dir}}/task-family/task-family_{{suite}}_t{{task}}.md` — the
    task/regime strategy, validated ranges, and failure table.
 3. TASK: `{{memory_dir}}/task-specific/{{reference_tag}}.json` plus
    `{{memory_dir}}/task-specific/{{reference_tag}}_recipe.jsonl` — the matched successful
