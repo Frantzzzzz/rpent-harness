@@ -157,8 +157,20 @@ def get_toolkit(
         root=config.prompt_vars.get("memory_dir") or get_memory_dir("libero"),
         memory_access="inbox_write" if explore else "read_only",
         inbox_cell_tag=config.recipe_tag if explore else None,
+        memory_abstention=config.prompt_vars.get("memory_abstention", "none"),
+        task_context={
+            "suite": config.prompt_vars.get("suite"),
+            "task": config.prompt_vars.get("task"),
+            "seed": config.prompt_vars.get("seed"),
+        },
+        read_log_path=(
+            config.output_dir / "memory_reads.jsonl"
+            if config.prompt_vars.get("memory_abstention", "none")
+            == "strict_identity"
+            else None
+        ),
     )
-    return LiberoToolkit(
+    toolkit = LiberoToolkit(
         runtime_kwargs=runtime_kwargs,
         dashboard_events=dashboard_events,
         memory=memory,
@@ -167,6 +179,15 @@ def get_toolkit(
         attempts_per_session=attempts_per_session,
         state_output_dir=state_output_dir,
     )
+    # The simulator exposes the verbatim task language only after the
+    # environment has been constructed.  Bind it before the planner can issue
+    # its first memory tool call.
+    try:
+        task_language = toolkit.primitives.env.get_task_language()
+    except (AttributeError, RuntimeError):
+        task_language = None
+    memory.set_task_context(task_language=task_language)
+    return toolkit
 
 
 def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
@@ -190,6 +211,15 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         choices=MEMORY_VERSIONS,
         default="auto",
         help="HF memory: auto selects by model; explicit versions override. Effort describes memory generation only.",
+    )
+    parser.add_argument(
+        "--memory-abstention",
+        choices=["none", "strict_identity"],
+        default="none",
+        help=(
+            "Memory compatibility gate. strict_identity accepts only memory "
+            "whose task-family/task-specific identity matches this task."
+        ),
     )
     parser.add_argument("--max-episode-steps", type=int, default=10000)
     parser.add_argument(
@@ -349,6 +379,7 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         "mode": "explore" if explore else "eval",
         "enable_direct_action": getattr(args, "enable_direct_action", False),
         "memory_profile": memory_profile,
+        "memory_abstention": getattr(args, "memory_abstention", "none"),
         "memory_dir": str(memory_dir),
         "reference_tag": f"{args.suite.replace('libero_', '')}_t{args.task}_s0",
         # Per-cell inbox: parallel explore runs must not append to a shared file.

@@ -17,9 +17,13 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import json
 import os
 import re
 import shutil
+import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -139,10 +143,26 @@ class MemoryManager:
         *,
         memory_access: str = "read_only",
         inbox_cell_tag: str | None = None,
+        memory_abstention: str = "none",
+        task_context: dict[str, Any] | None = None,
+        read_log_path: str | Path | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         self._memory_access = memory_access
         self._inbox_cell_tag = inbox_cell_tag
+        if memory_abstention not in {"none", "strict_identity"}:
+            raise ValueError(
+                "memory_abstention must be one of 'none' or 'strict_identity'"
+            )
+        self._memory_abstention = memory_abstention
+        self._task_context = dict(task_context or {})
+        self._read_log_path = (
+            Path(read_log_path).resolve() if read_log_path is not None else None
+        )
+        self._read_log_lock = threading.Lock()
+        # authorize_read stores the original path so record_read can prove
+        # which request delivered a file to the planner.
+        self._requested_paths: dict[Path, str] = {}
 
     @property
     def root(self) -> Path:
@@ -171,10 +191,250 @@ class MemoryManager:
     def list_directory(self, path: str | Path) -> tuple[Path, list[str] | None]:
         """Authorize a listing and return the entries visible to this run."""
         resolved = self._authorize(path, write=False)
-        return resolved, sorted(os.listdir(resolved)) if resolved.exists() else None
+        if not resolved.exists():
+            self._record_event(
+                event="memory_read_failure",
+                requested_path=str(path),
+                resolved_path=str(resolved),
+                scope=self._scope_for(resolved),
+                reason="path_missing",
+                exists=False,
+                read_success=False,
+            )
+            return resolved, None
+        entries = sorted(os.listdir(resolved))
+        # Do not expose task-specific artifacts from another task to a strict
+        # planner.  The exact pair remains discoverable when it exists.
+        if self._memory_abstention == "strict_identity":
+            try:
+                relative = resolved.relative_to(self._root)
+            except ValueError:
+                relative = None
+            if relative is not None and relative.parts == ("task-specific",):
+                allowed = set(self._expected_task_specific_names())
+                for name in entries:
+                    if name not in allowed:
+                        self._record_event(
+                            event="memory_abstention",
+                            requested_path=str(resolved / name),
+                            resolved_path=str(resolved / name),
+                            scope="task-specific",
+                            kind=self._kind_for(resolved / name),
+                            exists=True,
+                            read_success=False,
+                            reason="task_specific_identity_mismatch",
+                            expected_files=sorted(allowed),
+                            task_context=dict(self._task_context),
+                        )
+                entries = [name for name in entries if name in allowed]
+            elif relative is not None and relative.parts == ("task-family",):
+                allowed: list[str] = []
+                for name in entries:
+                    candidate = resolved / name
+                    if not candidate.is_file():
+                        allowed.append(name)
+                        continue
+                    check = self._family_identity_check(candidate)
+                    if check is None:
+                        allowed.append(name)
+                        continue
+                    reason, extra = check
+                    self._record_event(
+                        event="memory_abstention"
+                        if reason != "task_family_frontmatter_unreadable"
+                        else "memory_read_failure",
+                        requested_path=str(candidate),
+                        resolved_path=str(candidate),
+                        scope="task-family",
+                        kind=self._kind_for(candidate),
+                        exists=True,
+                        read_success=False,
+                        reason=reason,
+                        task_context=dict(self._task_context),
+                        **extra,
+                    )
+                entries = allowed
+        return resolved, entries
 
     def record_read(self, path: Path, content: str) -> None:
         """Record the content delivered by a file tool, when audit is required."""
+        requested = self._requested_paths.pop(path, str(path))
+        self._record_event(
+            event="memory_read",
+            requested_path=requested,
+            resolved_path=str(path),
+            scope=self._scope_for(path),
+            kind=self._kind_for(path),
+            exists=True,
+            read_success=True,
+            content_bytes=len(content.encode("utf-8")),
+            content_sha256=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        )
+
+    def set_task_context(self, **context: Any) -> None:
+        """Update identity fields learned after simulator initialization.
+
+        LIBERO exposes the verbatim task language only after the environment is
+        constructed.  The CLI supplies suite/task before construction and the
+        toolkit adds task_language immediately afterwards.
+        """
+        self._task_context.update({k: v for k, v in context.items() if v is not None})
+
+    @property
+    def memory_abstention(self) -> str:
+        return self._memory_abstention
+
+    def _record_event(self, *, event: str, **fields: Any) -> None:
+        """Append one structured memory event without touching the corpus."""
+        if self._read_log_path is None:
+            return
+        record = {
+            "event": event,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": self._memory_abstention,
+            **fields,
+        }
+        self._read_log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._read_log_lock, self._read_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+    def _scope_for(self, path: Path) -> str:
+        try:
+            parts = path.relative_to(self._root).parts
+        except ValueError:
+            return "external"
+        if not parts:
+            return "root"
+        if parts[0] in {"global", "task-family", "task-specific"}:
+            return parts[0]
+        return "index" if path.name == "MEMORY.md" else "other"
+
+    def _kind_for(self, path: Path) -> str:
+        name = path.name
+        if name.endswith("_recipe.jsonl"):
+            return "recipe"
+        if name.endswith(".json"):
+            return "audit"
+        if name.endswith(".md"):
+            return "markdown"
+        return "file"
+
+    def _expected_task_specific_names(self) -> tuple[str, ...]:
+        suite = str(self._task_context.get("suite") or "")
+        task = self._task_context.get("task")
+        if task is None:
+            return ()
+        # Object-S is the corpus covered by this gate.  Keep the basename
+        # exact, including the seed-0 suffix, so another task/seed cannot be
+        # silently used as a fallback.
+        if suite != "libero_object_swap":
+            return ()
+        try:
+            task_id = int(task)
+        except (TypeError, ValueError):
+            return ()
+        tag = f"object_swap_t{task_id}_s0"
+        return (f"{tag}.json", f"{tag}_recipe.jsonl")
+
+    def _expected_family_identity(self) -> dict[str, Any]:
+        suite = str(self._task_context.get("suite") or "")
+        if suite == "libero_object_swap":
+            return {"suite": "libero_object", "regime": "swap"}
+        # A strict gate is deliberately conservative for suites outside
+        # Object-S: no family leaf is accepted unless its suite/regime is
+        # exactly represented by the task identity.
+        if suite.startswith("libero_"):
+            pieces = suite.removeprefix("libero_").rsplit("_", 1)
+            if len(pieces) == 2:
+                return {"suite": pieces[0], "regime": pieces[1]}
+        return {"suite": None, "regime": None}
+
+    def _identity_failure(self, requested: str, resolved: Path, reason: str, **extra: Any) -> None:
+        self._record_event(
+            event="memory_abstention",
+            requested_path=requested,
+            resolved_path=str(resolved),
+            scope=self._scope_for(resolved),
+            kind=self._kind_for(resolved),
+            exists=resolved.exists(),
+            read_success=False,
+            reason=reason,
+            task_context=dict(self._task_context),
+            **extra,
+        )
+        raise PermissionError(
+            f"memory abstention ({reason}): refusing {requested!r} under strict_identity"
+        )
+
+    def _family_identity_check(
+        self, resolved: Path
+    ) -> tuple[str, dict[str, Any]] | None:
+        """Return an auditable mismatch for a task-family leaf, if any."""
+        try:
+            metadata, _ = _split_frontmatter(resolved)
+        except (OSError, ValueError) as exc:
+            return "task_family_frontmatter_unreadable", {"error": str(exc)}
+        expected = self._expected_family_identity()
+        observed = {
+            key: metadata.get(key)
+            for key in ("suite", "regime", "task_id", "task_language")
+        }
+        if observed.get("suite") != expected.get("suite"):
+            return "task_family_suite_mismatch", {
+                "expected_identity": expected,
+                "observed_identity": observed,
+            }
+        if observed.get("regime") != expected.get("regime"):
+            return "task_family_regime_mismatch", {
+                "expected_identity": expected,
+                "observed_identity": observed,
+            }
+        task = self._task_context.get("task")
+        if task is not None and str(observed.get("task_id")) != str(task):
+            return "task_family_task_id_mismatch", {
+                "expected_task_id": task,
+                "observed_task_id": observed.get("task_id"),
+            }
+        expected_language = self._task_context.get("task_language")
+        if expected_language is not None:
+            if str(observed.get("task_language") or "").strip() != str(expected_language).strip():
+                return "task_family_task_language_mismatch", {
+                    "expected_task_language": expected_language,
+                    "observed_task_language": observed.get("task_language"),
+                }
+        return None
+
+    def _guard_identity(self, requested: str, resolved: Path) -> None:
+        if self._memory_abstention != "strict_identity":
+            return
+        try:
+            relative = resolved.relative_to(self._root)
+        except ValueError:
+            return
+        parts = relative.parts
+        if not parts or parts[0] not in {"task-family", "task-specific"}:
+            return
+        if parts[0] == "task-specific":
+            # Listing the layer is allowed; the returned entries are filtered
+            # by list_directory to the exact task pair.
+            if len(parts) != 2:
+                return
+            expected = self._expected_task_specific_names()
+            if parts[1] not in expected:
+                self._identity_failure(
+                    requested,
+                    resolved,
+                    "task_specific_identity_mismatch",
+                    expected_files=list(expected),
+                )
+            return
+        # A directory listing is permitted; only a leaf read is checked.
+        if len(parts) != 2 or not resolved.is_file():
+            return
+        check = self._family_identity_check(resolved)
+        if check is not None:
+            reason, extra = check
+            self._identity_failure(requested, resolved, reason, **extra)
 
     def authorize_write(self, path: str | Path) -> Path:
         """Resolve a path and enforce the current run's memory write permissions."""
@@ -206,6 +466,21 @@ class MemoryManager:
             or parts[0] in {"global", "task-family", "task-specific", "results"}
             or (len(parts) == 1 and parts[0].endswith(".md"))
         ):
+            requested = str(path)
+            self._requested_paths[resolved] = requested
+            if not resolved.exists() and parts and parts[0] in {"task-family", "task-specific"}:
+                self._record_event(
+                    event="memory_read_failure",
+                    requested_path=requested,
+                    resolved_path=str(resolved),
+                    scope=parts[0],
+                    kind=self._kind_for(resolved),
+                    exists=False,
+                    read_success=False,
+                    reason="path_missing",
+                    task_context=dict(self._task_context),
+                )
+            self._guard_identity(requested, resolved)
             return resolved
         raise PermissionError(f"reading this memory path is denied: {path}")
 

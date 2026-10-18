@@ -255,6 +255,92 @@ def test_memory_manager_does_not_publish_unsolved_task_artifacts(
     assert not (memory_dir / "task-specific" / f"{cell}_recipe.jsonl").exists()
 
 
+def _write_object_swap_family(path: Path, *, task_id: int = 0, language: str = "put the object in the basket", suite: str = "libero_object", regime: str = "swap") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "id": path.stem,
+        "scope": "task-family",
+        "suite": suite,
+        "regime": regime,
+        "task_id": task_id,
+        "task_language": language,
+        "confidence": "single-shot",
+        "evidence": {"cells": [f"object_swap_t{task_id}_s0"]},
+    }
+    path.write_text(
+        "---\n" + yaml.safe_dump(metadata, sort_keys=False) + "---\nfamily body\n"
+    )
+
+
+def test_strict_identity_accepts_matching_family_and_records_body(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    leaf = root / "task-family" / "task-family_libero_object_swap_t0.md"
+    _write_object_swap_family(leaf)
+    log = tmp_path / "run" / "memory_reads.jsonl"
+    manager = MemoryManager(
+        root,
+        memory_abstention="strict_identity",
+        task_context={
+            "suite": "libero_object_swap",
+            "task": 0,
+            "task_language": "put the object in the basket",
+        },
+        read_log_path=log,
+    )
+
+    content = CommonTools(memory=manager).read_text_file(path=str(leaf)).data
+
+    assert content["content"] == "family body\n"
+    event = json.loads(log.read_text().splitlines()[-1])
+    assert event["event"] == "memory_read"
+    assert event["scope"] == "task-family"
+    assert event["read_success"] is True
+
+
+def test_strict_identity_abstains_on_family_mismatch(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    leaf = root / "task-family" / "task-family_libero10_swap_t0.md"
+    _write_object_swap_family(leaf, suite="libero10")
+    log = tmp_path / "run" / "memory_reads.jsonl"
+    manager = MemoryManager(
+        root,
+        memory_abstention="strict_identity",
+        task_context={"suite": "libero_object_swap", "task": 0},
+        read_log_path=log,
+    )
+
+    with pytest.raises(PermissionError, match="task_family_suite_mismatch"):
+        CommonTools(memory=manager).read_text_file(path=str(leaf))
+
+    event = json.loads(log.read_text().splitlines()[-1])
+    assert event["event"] == "memory_abstention"
+    assert event["read_success"] is False
+    assert event["reason"] == "task_family_suite_mismatch"
+
+
+def test_strict_identity_allows_only_exact_object_swap_task_pair(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    task_dir = root / "task-specific"
+    task_dir.mkdir(parents=True)
+    (task_dir / "object_swap_t0_s0.json").write_text("{}")
+    (task_dir / "object_swap_t0_s0_recipe.jsonl").write_text("{}\n")
+    (task_dir / "object_swap_t1_s0.json").write_text("{}")
+    manager = MemoryManager(
+        root,
+        memory_abstention="strict_identity",
+        task_context={"suite": "libero_object_swap", "task": 0},
+    )
+    tools = CommonTools(memory=manager)
+
+    assert tools.read_text_file(path=str(task_dir / "object_swap_t0_s0.json")).data["content"] == "{}"
+    assert tools.read_text_file(path=str(task_dir / "object_swap_t0_s0_recipe.jsonl")).data["content"] == "{}\n"
+    with pytest.raises(PermissionError, match="task_specific_identity_mismatch"):
+        tools.read_text_file(path=str(task_dir / "object_swap_t1_s0.json"))
+
+    _, visible = manager.list_directory(task_dir)
+    assert visible == ["object_swap_t0_s0.json", "object_swap_t0_s0_recipe.jsonl"]
+
+
 def test_memory_manager_skips_invalid_draft_without_archiving_its_inbox(
     tmp_path: Path,
 ) -> None:
