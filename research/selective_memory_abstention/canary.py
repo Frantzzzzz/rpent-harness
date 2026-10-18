@@ -600,7 +600,11 @@ def parser() -> argparse.ArgumentParser:
     pre.add_argument("--sam-checkpoint", default=None)
     pre.add_argument("--initial-state", default=None)
     pre.add_argument("--prompt-file", action="append", default=list(DEFAULT_PROMPTS))
-    pre.add_argument("--memory-abstention", choices=("none", "strict_identity"), default="strict_identity")
+    pre.add_argument(
+        "--memory-abstention",
+        choices=("none", "strict_identity", "scene_drift"),
+        default="strict_identity",
+    )
     pre.add_argument("--max-steps", type=int, default=10000)
     pre.add_argument("--planner-timeout-s", type=int, default=None)
     pre.add_argument("--libero-type", default="pro")
@@ -625,7 +629,11 @@ def parser() -> argparse.ArgumentParser:
     queue.add_argument("--planner", default="codex")
     queue.add_argument("--planner-model", default="gpt-5.6-sol")
     queue.add_argument("--reasoning-effort", default="high")
-    queue.add_argument("--memory-abstention", choices=("none", "strict_identity"), default="strict_identity")
+    queue.add_argument(
+        "--memory-abstention",
+        choices=("none", "strict_identity", "scene_drift"),
+        default="strict_identity",
+    )
     queue.add_argument("--max-steps", type=int, default=10000)
     queue.add_argument("--planner-timeout-s", type=int, default=None)
     queue.add_argument("--libero-type", default="pro")

@@ -341,6 +341,61 @@ def test_strict_identity_allows_only_exact_object_swap_task_pair(tmp_path: Path)
     assert visible == ["object_swap_t0_s0.json", "object_swap_t0_s0_recipe.jsonl"]
 
 
+def test_scene_drift_abstains_from_seed_zero_task_memory_and_logs_reason(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "memory"
+    task_dir = root / "task-specific"
+    task_dir.mkdir(parents=True)
+    audit = task_dir / "object_swap_t0_s0.json"
+    recipe = task_dir / "object_swap_t0_s0_recipe.jsonl"
+    audit.write_text("{\"seed\": 0}\n")
+    recipe.write_text("{\"primitive\": \"move_to\"}\n")
+    log = tmp_path / "run" / "memory_reads.jsonl"
+    manager = MemoryManager(
+        root,
+        memory_abstention="scene_drift",
+        task_context={"suite": "libero_object_swap", "task": 0, "seed": 1},
+        read_log_path=log,
+    )
+    tools = CommonTools(memory=manager)
+
+    with pytest.raises(PermissionError, match="scene_drift_stale_reference"):
+        tools.read_text_file(path=str(audit))
+    _, visible = manager.list_directory(task_dir)
+    assert visible == []
+
+    events = [json.loads(line) for line in log.read_text().splitlines()]
+    assert any(
+        event["event"] == "memory_abstention"
+        and event["reason"] == "scene_drift_stale_reference"
+        and event["kind"] == "audit"
+        for event in events
+    )
+    assert any(
+        event["event"] == "memory_abstention"
+        and event["reason"] == "scene_drift_stale_reference"
+        and event["kind"] == "recipe"
+        for event in events
+    )
+
+
+def test_scene_drift_is_inert_for_seed_zero_and_non_swap(tmp_path: Path) -> None:
+    root = tmp_path / "memory"
+    task_dir = root / "task-specific"
+    task_dir.mkdir(parents=True)
+    artifact = task_dir / "object_swap_t0_s0.json"
+    artifact.write_text("{}")
+
+    for context in (
+        {"suite": "libero_object_swap", "task": 0, "seed": 0},
+        {"suite": "libero_object_task", "task": 0, "seed": 1},
+    ):
+        manager = MemoryManager(root, memory_abstention="scene_drift", task_context=context)
+        result = CommonTools(memory=manager).read_text_file(path=str(artifact))
+        assert result.data["content"] == "{}"
+
+
 def test_memory_manager_skips_invalid_draft_without_archiving_its_inbox(
     tmp_path: Path,
 ) -> None:

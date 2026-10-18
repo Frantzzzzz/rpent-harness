@@ -150,9 +150,10 @@ class MemoryManager:
         self._root = Path(root).resolve()
         self._memory_access = memory_access
         self._inbox_cell_tag = inbox_cell_tag
-        if memory_abstention not in {"none", "strict_identity"}:
+        if memory_abstention not in {"none", "strict_identity", "scene_drift"}:
             raise ValueError(
-                "memory_abstention must be one of 'none' or 'strict_identity'"
+                "memory_abstention must be one of 'none', 'strict_identity', or "
+                "'scene_drift'"
             )
         self._memory_abstention = memory_abstention
         self._task_context = dict(task_context or {})
@@ -205,28 +206,38 @@ class MemoryManager:
         entries = sorted(os.listdir(resolved))
         # Do not expose task-specific artifacts from another task to a strict
         # planner.  The exact pair remains discoverable when it exists.
-        if self._memory_abstention == "strict_identity":
+        if self._identity_gate_active():
             try:
                 relative = resolved.relative_to(self._root)
             except ValueError:
                 relative = None
             if relative is not None and relative.parts == ("task-specific",):
-                allowed = set(self._expected_task_specific_names())
-                for name in entries:
-                    if name not in allowed:
-                        self._record_event(
-                            event="memory_abstention",
-                            requested_path=str(resolved / name),
-                            resolved_path=str(resolved / name),
-                            scope="task-specific",
-                            kind=self._kind_for(resolved / name),
-                            exists=True,
-                            read_success=False,
-                            reason="task_specific_identity_mismatch",
-                            expected_files=sorted(allowed),
-                            task_context=dict(self._task_context),
-                        )
-                entries = [name for name in entries if name in allowed]
+                if self._scene_drift_active():
+                    # Seed-0 task-specific artifacts encode coordinates and
+                    # object arrangements from a different scene instance.
+                    # Keep the layer visible for auditability, but expose no
+                    # entries to the planner and emit one event per hidden
+                    # artifact so the abstention is independently verifiable.
+                    for name in entries:
+                        self._record_scene_drift_abstention(resolved / name)
+                    entries = []
+                else:
+                    allowed = set(self._expected_task_specific_names())
+                    for name in entries:
+                        if name not in allowed:
+                            self._record_event(
+                                event="memory_abstention",
+                                requested_path=str(resolved / name),
+                                resolved_path=str(resolved / name),
+                                scope="task-specific",
+                                kind=self._kind_for(resolved / name),
+                                exists=True,
+                                read_success=False,
+                                reason="task_specific_identity_mismatch",
+                                expected_files=sorted(allowed),
+                                task_context=dict(self._task_context),
+                            )
+                    entries = [name for name in entries if name in allowed]
             elif relative is not None and relative.parts == ("task-family",):
                 allowed: list[str] = []
                 for name in entries:
@@ -283,6 +294,41 @@ class MemoryManager:
     @property
     def memory_abstention(self) -> str:
         return self._memory_abstention
+
+    def _scene_drift_active(self) -> bool:
+        """Whether seed-0 task memory is stale for this evaluation scene.
+
+        ``scene_drift`` is deliberately a no-op outside Object-S swap
+        evaluation seeds.  This keeps seed 0 (the reference scene used to
+        create task-specific artifacts) and all other benchmarks identical to
+        the pre-existing memory behavior.
+        """
+        if self._memory_abstention != "scene_drift":
+            return False
+        if str(self._task_context.get("suite") or "") != "libero_object_swap":
+            return False
+        try:
+            return int(self._task_context.get("seed", 0)) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _identity_gate_active(self) -> bool:
+        return self._memory_abstention == "strict_identity" or self._scene_drift_active()
+
+    def _record_scene_drift_abstention(self, path: Path) -> None:
+        self._record_event(
+            event="memory_abstention",
+            requested_path=str(path),
+            resolved_path=str(path),
+            scope="task-specific",
+            kind=self._kind_for(path),
+            exists=path.exists(),
+            read_success=False,
+            reason="scene_drift_stale_reference",
+            reference_seed=0,
+            current_seed=self._task_context.get("seed"),
+            task_context=dict(self._task_context),
+        )
 
     def _record_event(self, *, event: str, **fields: Any) -> None:
         """Append one structured memory event without touching the corpus."""
@@ -405,7 +451,7 @@ class MemoryManager:
         return None
 
     def _guard_identity(self, requested: str, resolved: Path) -> None:
-        if self._memory_abstention != "strict_identity":
+        if not self._identity_gate_active():
             return
         try:
             relative = resolved.relative_to(self._root)
@@ -417,6 +463,14 @@ class MemoryManager:
         if parts[0] == "task-specific":
             # Listing the layer is allowed; the returned entries are filtered
             # by list_directory to the exact task pair.
+            if self._scene_drift_active() and len(parts) >= 2:
+                self._identity_failure(
+                    requested,
+                    resolved,
+                    "scene_drift_stale_reference",
+                    reference_seed=0,
+                    current_seed=self._task_context.get("seed"),
+                )
             if len(parts) != 2:
                 return
             expected = self._expected_task_specific_names()

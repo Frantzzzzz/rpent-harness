@@ -214,11 +214,13 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     )
     parser.add_argument(
         "--memory-abstention",
-        choices=["none", "strict_identity"],
+        choices=["none", "strict_identity", "scene_drift"],
         default="none",
         help=(
             "Memory compatibility gate. strict_identity accepts only memory "
-            "whose task-family/task-specific identity matches this task."
+            "whose task-family/task-specific identity matches this task; "
+            "scene_drift abstains from seed-0 task-specific artifacts on "
+            "Object-S swap seeds > 0."
         ),
     )
     parser.add_argument("--max-episode-steps", type=int, default=10000)
