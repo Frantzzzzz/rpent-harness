@@ -1,0 +1,46 @@
+{
+  "schema": "selective_memory_abstention.paired_demo.v1",
+  "benchmark": "LIBERO-Pro Object-S",
+  "suite": "libero_object_swap",
+  "task_id": 0,
+  "seed": 1,
+  "planner": "GPT-5.6-sol",
+  "vla": "Pi0.5",
+  "memory_corpus": "GPT_5.5_xhigh",
+  "conditions": {
+    "R0_native_memory": {
+      "run": "demo_r0_t0_s1",
+      "memory_abstention": "none",
+      "task_specific_audit": "read_success=true",
+      "task_specific_recipe": "read_success=true",
+      "terminated": false,
+      "truncated": false,
+      "human_verdict": "valid_failure_with_observed_placement_failure",
+      "primary_observed_failure": "The first grasp and transport succeeded; approach stalled and release left the can outside the basket; recovery grasps failed.",
+      "failure_class": "placement_or_release",
+      "secondary_failure_class": "grasp",
+      "harmful_memory_execution": "possible_contribution_only; not established causally"
+    },
+    "R1_scene_drift_abstention": {
+      "run": "demo_r1_t0_s1",
+      "memory_abstention": "scene_drift",
+      "task_specific_audit": "read_success=false; reason=scene_drift_stale_reference",
+      "task_specific_recipe": "read_success=false; reason=scene_drift_stale_reference",
+      "terminated": false,
+      "truncated": false,
+      "human_verdict": "valid_failure_with_observed_post_release_tipout",
+      "primary_observed_failure": "The first grasp selected the wrong can; the second grasp succeeded and placed the blue can inside, but it tipped out during/after retreat.",
+      "failure_class": "placement_or_release",
+      "secondary_failure_class": "target_identification",
+      "harmful_memory_execution": "not observed from rejected task-specific files"
+    }
+  },
+  "paired_result": {
+    "success_R0": 0,
+    "success_R1": 0,
+    "delta_success": 0,
+    "same_seed_comparison": "R1 changed memory exposure and the failure trajectory, but did not improve the environment success predicate in this single pair.",
+    "mechanism_evidence": "R1 produced explicit, structured abstention events for both task-specific files and did not silently fall back to another task corpus.",
+    "interpretation_limit": "n=1 paired demo; no success-rate or statistical claim is valid. The current scene_drift rule is a known Object-S stress test and is not yet a general scene-compatibility method."
+  }
+}
