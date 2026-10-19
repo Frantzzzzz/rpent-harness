@@ -4,6 +4,15 @@
 planner, start a simulator, download a checkpoint, or write the memory corpus.
 Run it from the repository root (or pass `--repo`).
 
+Load the fixed experiment paths once before generating or executing any
+episode. The RPent VLA and SAM3 child servers read their checkpoints from the
+two exported environment variables, so passing paths only to preflight is not
+sufficient:
+
+```bash
+source research/selective_memory_abstention/experiment_env.sh
+```
+
 ```bash
 python research/selective_memory_abstention/canary.py preflight \
   --output-dir runs/selective_memory_abstention/R1/libero_object_swap_t0_s1 \

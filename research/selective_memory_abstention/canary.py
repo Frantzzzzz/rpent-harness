@@ -338,6 +338,11 @@ def build_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str,
     memory_root = Path(args.memory_root).expanduser().resolve()
     vla = _arg_path(args.vla_checkpoint, "PI05_CHECKPOINT_PATH")
     sam = _arg_path(args.sam_checkpoint, "SAM3_CHECKPOINT_PATH")
+    # RPent's local child servers resolve these paths from the parent
+    # environment; the CLI does not pass --model-path/--checkpoint flags.
+    # Keep the explicit preflight paths and the runtime environment in sync.
+    vla_env = _arg_path(None, "PI05_CHECKPOINT_PATH")
+    sam_env = _arg_path(None, "SAM3_CHECKPOINT_PATH")
     initial = _arg_path(args.initial_state, "LIBERO_INITIAL_STATE_PATH")
     memory = memory_layout(
         memory_root,
@@ -364,6 +369,12 @@ def build_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str,
         },
         "vla_checkpoint": _path_check(vla, required=True),
         "sam_checkpoint": _path_check(sam, required=True),
+        "runtime_checkpoint_environment": {
+            "PI05_CHECKPOINT_PATH": _path_check(vla_env, required=True),
+            "SAM3_CHECKPOINT_PATH": _path_check(sam_env, required=True),
+            "vla_matches_preflight": bool(vla and vla_env and vla == vla_env),
+            "sam_matches_preflight": bool(sam and sam_env and sam == sam_env),
+        },
         "initial_state": _path_check(initial, required=True),
         "prompt_files": prompt_hashes,
     }
@@ -375,6 +386,14 @@ def build_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str,
     ]
     if any(value.get("status") != "ok" for value in prompt_hashes.values()):
         missing.append("prompt_files")
+    runtime_env = checks["runtime_checkpoint_environment"]
+    for name in ("PI05_CHECKPOINT_PATH", "SAM3_CHECKPOINT_PATH"):
+        if runtime_env[name].get("status") != "ok":
+            missing.append(f"runtime_env:{name}")
+    if not runtime_env["vla_matches_preflight"]:
+        missing.append("runtime_env:PI05_CHECKPOINT_PATH_mismatch")
+    if not runtime_env["sam_matches_preflight"]:
+        missing.append("runtime_env:SAM3_CHECKPOINT_PATH_mismatch")
     if git["dirty"] and not args.allow_dirty:
         missing.append("git_dirty")
     if memory.get("receipt_matches_files") is False:
@@ -396,6 +415,10 @@ def build_preflight(args: argparse.Namespace) -> tuple[dict[str, Any], dict[str,
         "vla_model": args.vla_model,
         "vla_checkpoint": str(vla) if vla else None,
         "sam_checkpoint": str(sam) if sam else None,
+        "runtime_checkpoint_environment": {
+            "PI05_CHECKPOINT_PATH": str(vla_env) if vla_env else None,
+            "SAM3_CHECKPOINT_PATH": str(sam_env) if sam_env else None,
+        },
         "service_endpoints": {
             "env": args.env_endpoint,
             "vla": args.vla_endpoint,
@@ -453,7 +476,15 @@ def write_preflight(args: argparse.Namespace) -> int:
     atomic_json(output / "preflight.json", preflight)
     atomic_json(output / "memory_manifest.json", memory)
     command_text = " ".join(shlex.quote(part) for part in argv) + "\n"
-    (output / "episode_command.sh").write_text("#!/usr/bin/env bash\nset -euo pipefail\n" + command_text, encoding="utf-8")
+    env_file = Path(args.repo).expanduser().resolve() / "research/selective_memory_abstention/experiment_env.sh"
+    env_prefix = (
+        f"source {shlex.quote(str(env_file))}\n"
+        "# The sourced file supplies PI05_CHECKPOINT_PATH and SAM3_CHECKPOINT_PATH to child servers.\n"
+    )
+    (output / "episode_command.sh").write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + env_prefix + command_text,
+        encoding="utf-8",
+    )
     (output / "episode_command.sh").chmod(0o755)
     print(json.dumps({"status": preflight["status"], "output_dir": str(output), "command_hash": preflight["command_hash"]}, indent=2))
     return 0 if preflight["status"] == "ready" else 1
@@ -497,6 +528,11 @@ def write_queue(args: argparse.Namespace) -> int:
     runner = path.with_name(path.stem + "_run.sh")
     runner.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
+        + "source "
+        + shlex.quote(
+            str(Path(args.repo).expanduser().resolve() / "research/selective_memory_abstention/experiment_env.sh")
+        )
+        + "\n"
         + "exec "
         + shlex.quote(sys.executable)
         + " "
